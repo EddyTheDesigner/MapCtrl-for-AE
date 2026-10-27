@@ -1,0 +1,137 @@
+/* MapCtrl for AE - native ScriptUI, ES3, no external image assets. */
+function MapCtrlUI(thisObj) {
+    var C={bg:[0.118,0.133,0.157,1],surface:[0.157,0.180,0.212,1],hover:[0.216,0.247,0.286,1],ink:[0.91,0.94,0.97,1],muted:[0.60,0.66,0.73,1],accent:[0.42,0.87,0.74,1],map:[0.27,0.32,0.38,1],border:[0.13,0.16,0.20,1],error:[1,0.55,0.48,1]};
+    var win=(thisObj instanceof Panel)?thisObj:new Window('palette','MapCtrl for AE',undefined,{resizeable:true});
+    var selected=[],picked=null,waypoints=[],pins=[],syncing=false,states=MapCtrlData.states;
+    var preview,tabs,stateList,countText,pointText,queue,pinMenu,status;
+    var stateColor,pinColor,routeColor,stateDuration,stagger,pinDuration,pinSize,pinLabel;
+    var routeDuration,routeWidth,routeDash,routeGap,routeFlow;
+    function brush(g,c){return g.newBrush(g.BrushType.SOLID_COLOR,c);}
+    function pen(g,c,w){return g.newPen(g.PenType.SOLID_COLOR,c,w||1);}
+    function redraw(c){try{c.notify('onDraw');}catch(ignore){}}
+    function theme(c,color){try{c.graphics.backgroundColor=brush(c.graphics,color||C.bg);c.graphics.foregroundColor=pen(c.graphics,C.ink);}catch(ignore){}return c;}
+    function row(p){var r=p.add('group');r.orientation='row';r.alignChildren=['left','center'];r.alignment=['fill','top'];r.spacing=7;r.margins=0;return r;}
+    function stretch(p){var s=p.add('group');s.alignment=['fill','fill'];return s;}
+    function note(p,t){var n=p.add('statictext',undefined,t);n.alignment=['fill','top'];try{n.graphics.foregroundColor=pen(n.graphics,C.muted);}catch(ignore){}return n;}
+    function say(t,error){if(!status){return;}status.text=t;status.helpTip=t;try{status.graphics.foregroundColor=pen(status.graphics,error?C.error:C.muted);}catch(ignore){}}
+    function act(fn,success){return function(){try{fn();if(success){say(success,false);}}catch(e){say(e.message||String(e),true);}};}
+    function line(g,p,pts,ox,oy){g.newPath();g.moveTo(pts[0][0]+ox,pts[0][1]+oy);for(var i=1;i<pts.length;i++){g.lineTo(pts[i][0]+ox,pts[i][1]+oy);}g.strokePath(p);}
+    function oval(g,p,x,y,w,h,b){g.newPath();g.ellipsePath(x,y,w,h);if(b){g.fillPath(b);}if(p){g.strokePath(p);}}
+    function icon(g,name,color,ox,oy){
+        var p=pen(g,color,1.6),b=brush(g,color);
+        function l(v){line(g,p,v,ox,oy);}function o(x,y,w,h,solid){oval(g,solid?null:p,x+ox,y+oy,w,h,solid?b:null);}
+        if(name==='map'){l([[2,5],[8,2],[15,5],[22,2],[22,19],[15,22],[8,19],[2,22],[2,5]]);l([[8,2],[8,19]]);l([[15,5],[15,22]]);}
+        else if(name==='fill'){l([[10,2],[3,10],[12,19],[20,11],[11,2]]);l([[5,12],[18,12]]);o(18,19,4,4,true);}
+        else if(name==='play'){g.newPath();g.moveTo(7+ox,3+oy);g.lineTo(21+ox,12+oy);g.lineTo(7+ox,21+oy);g.closePath();g.fillPath(b);}
+        else if(name==='pin'){o(5,2,14,14,false);l([[6,12],[12,23],[18,12]]);o(10,7,4,4,true);}
+        else if(name==='route'){o(1,15,6,6,false);o(17,2,6,6,false);l([[7,18],[11,18],[14,15]]);l([[15,12],[15,8],[18,5]]);}
+        else if(name==='plus'){l([[12,4],[12,20]]);l([[4,12],[20,12]]);}
+        else if(name==='up'){l([[5,14],[12,7],[19,14]]);l([[12,7],[12,21]]);}
+        else if(name==='down'){l([[5,10],[12,17],[19,10]]);l([[12,3],[12,17]]);}
+        else if(name==='remove'){l([[6,6],[18,18]]);l([[18,6],[6,18]]);}
+        else if(name==='trash'){l([[5,7],[7,22],[17,22],[19,7]]);l([[3,5],[21,5]]);l([[9,5],[9,2],[15,2],[15,5]]);l([[10,10],[10,18]]);l([[14,10],[14,18]]);}
+        else if(name==='refresh'){l([[21,10],[18,5],[13,3],[7,5],[3,10],[4,16],[8,20],[14,21],[20,17]]);l([[21,3],[21,10],[14,10]]);}
+        else if(name==='help'){o(2,2,20,20,false);l([[8,8],[9,6],[14,6],[16,8],[15,11],[12,13],[12,15]]);o(11,18,2,2,true);}
+        else if(name==='all'){l([[9,3],[3,3],[3,9]]);l([[15,3],[21,3],[21,9]]);l([[3,15],[3,21],[9,21]]);l([[15,21],[21,21],[21,15]]);l([[7,12],[10,15],[17,8]]);}
+        else if(name==='none'){l([[4,4],[20,4],[20,20],[4,20],[4,4]]);l([[8,12],[16,12]]);}
+        else if(name==='target'){o(6,6,12,12,false);l([[12,1],[12,7]]);l([[12,17],[12,23]]);l([[1,12],[7,12]]);l([[17,12],[23,12]]);}
+        else if(name==='sync'){l([[3,7],[20,7],[16,3]]);l([[20,7],[16,11]]);l([[21,17],[4,17],[8,13]]);l([[4,17],[8,21]]);}
+    }
+    function button(p,symbol,tip,callback,primary){
+        var b=p.add('button',undefined,'');b.preferredSize=[34,32];b.minimumSize=[32,30];b.maximumSize=[40,34];b.helpTip=tip;b._hover=false;
+        b.onDraw=function(){var g=this.graphics,w=this.size.width,h=this.size.height;g.newPath();g.rectPath(0,0,w,h);g.fillPath(brush(g,primary?[0.20,0.35,0.33,1]:(this._hover?C.hover:C.surface)));icon(g,symbol,this.enabled?(primary?C.accent:C.ink):C.muted,(w-24)/2,(h-24)/2);if(this.active){g.newPath();g.rectPath(1,1,w-2,h-2);g.strokePath(pen(g,C.accent,1));}};
+        b.addEventListener('mouseover',function(){this._hover=true;redraw(this);});b.addEventListener('mouseout',function(){this._hover=false;redraw(this);});b.addEventListener('focus',function(){redraw(this);});b.addEventListener('blur',function(){redraw(this);});b.onClick=callback;return b;
+    }
+    function numeric(p,label,value,tip,chars){p.add('statictext',undefined,label);var e=theme(p.add('edittext',undefined,String(value)),C.surface);e.characters=chars||4;e.preferredSize.height=25;e.helpTip=tip;return e;}
+    function numberValue(f,name,min,max){var s=f.text.replace(/^\s+|\s+$/g,''),n;if(!/^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(s)){throw new Error(name+' must be a number.');}n=Number(s);if(!isFinite(n)||n<min||n>max){throw new Error(name+' must be between '+min+' and '+max+'.');}return n;}
+    function colorControl(p,value){
+        var r=row(p),e,swatch,current=value;r.add('statictext',undefined,'Color');swatch=r.add('button',undefined,'');swatch.preferredSize=[30,26];swatch.helpTip='Choose a color';e=theme(r.add('edittext',undefined,value),C.surface);e.characters=9;e.helpTip='Six-digit hex color, for example #6BDDBD';
+        function read(){var h=e.text.replace(/^\s+|\s+$/g,'').replace(/^#/,'');if(!/^[0-9a-fA-F]{6}$/.test(h)){throw new Error('Enter a six-digit hex color, such as #6BDDBD.');}current='#'+h.toUpperCase();return [parseInt(h.substr(0,2),16)/255,parseInt(h.substr(2,2),16)/255,parseInt(h.substr(4,2),16)/255];}
+        swatch.onDraw=function(){var g=this.graphics,c=current.substr(1),rgb=[parseInt(c.substr(0,2),16)/255,parseInt(c.substr(2,2),16)/255,parseInt(c.substr(4,2),16)/255,1];g.newPath();g.rectPath(3,3,this.size.width-6,this.size.height-6);g.fillPath(brush(g,rgb));if(this.active){g.strokePath(pen(g,C.ink,1));}};
+        swatch.onClick=act(function(){var result=$.colorPicker();if(result<0){return;}var h=Math.floor(result).toString(16).toUpperCase();while(h.length<6){h='0'+h;}e.text='#'+h;read();redraw(swatch);});e.onChange=act(function(){read();e.text=current;redraw(swatch);});return {read:read,row:r};
+    }
+    function hasId(id){for(var i=0;i<selected.length;i++){if(selected[i]===id){return true;}}return false;}
+    function stateById(id){for(var i=0;i<states.length;i++){if(states[i].id===id){return states[i];}}return null;}
+    function selectionArray(list){if(!list.selection){return [];}return typeof list.selection.length==='number'?list.selection:[list.selection];}
+    function selectionChanged(){countText.text=selected.length+' selected';redraw(preview);}
+    function populateStates(filter){syncing=true;stateList.removeAll();filter=(filter||'').toLowerCase();for(var i=0;i<states.length;i++){var s=states[i];if(!filter||(s.name+' '+s.id).toLowerCase().indexOf(filter)>=0){var item=stateList.add('item',s.id+'    '+s.name);item._stateId=s.id;item.selected=hasId(s.id);}}syncing=false;selectionChanged();}
+    function syncStateList(){syncing=true;for(var i=0;i<stateList.items.length;i++){stateList.items[i].selected=hasId(stateList.items[i]._stateId);}syncing=false;selectionChanged();}
+    function requiredStates(){if(!selected.length){throw new Error('Select one or more states on the map or in the list.');}return selected;}
+    function mapView(){var w=preview.size.width,h=preview.size.height,s=Math.min((w-18)/MapCtrlData.width,(h-18)/MapCtrlData.height);return {s:s,x:(w-MapCtrlData.width*s)/2,y:(h-MapCtrlData.height*s)/2};}
+    function insideRing(p,ring){var hit=false,j=ring.length-1;for(var i=0;i<ring.length;i++){var a=ring[i],b=ring[j];if(((a[1]>p[1])!==(b[1]>p[1]))&&p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0]){hit=!hit;}j=i;}return hit;}
+    function stateAt(p){for(var i=states.length-1;i>=0;i--){var hit=false;for(var j=0;j<states[i].rings.length;j++){if(insideRing(p,states[i].rings[j])){hit=!hit;}}if(hit){return states[i];}}return null;}
+    function pinPoint(){if(picked){return picked;}if(selected.length){return stateById(selected[0]).center;}throw new Error('Click the map to place a pin, or select a state first.');}
+    function showPoint(){var p=picked||(selected.length?stateById(selected[0]).center:null),s=p?stateAt(p):null;pointText.text=p?(s?s.name+'  /  ':'Map position  /  ')+Math.round(p[0])+', '+Math.round(p[1]):'Click the map to choose a position';}
+    function waypointPoint(w){if(w.point){return w.point;}for(var i=0;i<pins.length;i++){if(pins[i].id===w.pinId){return pins[i].point;}}return null;}
+    function refreshPins(){pins=[];pinMenu.removeAll();try{pins=MapCtrlCore.getPins();}catch(e){pinMenu.add('item','No active map');pinMenu.selection=0;redraw(preview);throw e;}for(var i=0;i<pins.length;i++){var item=pinMenu.add('item',pins[i].name);item._pinId=pins[i].id;}if(pinMenu.items.length){pinMenu.selection=0;}else{pinMenu.add('item','No pins in the active map');pinMenu.selection=0;}redraw(preview);}
+    function updateQueue(index){queue.removeAll();for(var i=0;i<waypoints.length;i++){queue.add('item',(i+1)+'   '+(waypoints[i].label||'Map point'));}if(queue.items.length&&index!==undefined){queue.selection=Math.max(0,Math.min(index,queue.items.length-1));}redraw(preview);}
+    function selectedQueueIndex(){if(!queue.selection){throw new Error('Select a waypoint in the list first.');}return queue.selection.index;}
+    function currentMode(){return tabs&&tabs.selection?tabs.selection.text:'States';}
+    win.orientation='column';win.alignChildren=['fill','top'];win.spacing=10;win.margins=14;win.minimumSize=[350,630];theme(win);
+    var header=row(win),titleGroup=header.add('group');titleGroup.orientation='column';titleGroup.alignChildren=['left','top'];titleGroup.spacing=0;
+    var title=titleGroup.add('statictext',undefined,'MapCtrl');try{title.graphics.font=ScriptUI.newFont('dialog','BOLD',22);title.graphics.foregroundColor=pen(title.graphics,C.ink);}catch(ignoreFont){}
+    note(titleGroup,'UNITED STATES  /  '+MapCtrlCore.version);stretch(header);
+    button(header,'map','Create a United States map',act(function(){MapCtrlCore.createMap({fill:[0.27,0.32,0.38],stroke:[0.13,0.16,0.20],strokeWidth:1.2});refreshPins();},'Map ready. Select states, add pins, or draw a route.'),true);
+    button(header,'refresh','Refresh pins and active composition',act(function(){refreshPins();},'Active map refreshed.'));
+    button(header,'help','MapCtrl quick guide',function(){alert('MAPCTRL FOR AE\n\n1. Click the folded-map icon to create a map.\n2. States: select on the map or in the list. Ctrl/Cmd-click to select several. The bucket applies color; the play icon animates to it.\n3. Pins: click the preview to place a pin, enter an optional label, then click the pin icon. Move pins in the composition afterward.\n4. Routes: click the preview to add points, or add existing pins from the dropdown. Order the points, then click the route icon. Routes linked to pins follow them.\n\nAnimations start at the current composition time. Duration and stagger are in seconds. Sizes and dash spacing are in map pixels.\n\nEach edit is undoable. Shapes and keyframes remain editable in the timeline. Hover an icon for its label. The preview shows the base map, not timeline transforms.','MapCtrl quick guide');});
+    preview=theme(win.add('panel',undefined,''),C.bg);preview.preferredSize=[322,172];preview.minimumSize=[300,170];preview.maximumSize.height=230;preview.helpTip='Click a state. Ctrl/Cmd-click to select several.';
+    preview.onDraw=function(){
+        var g=this.graphics,v=mapView(),i,j,k,ring,s,mode=currentMode();g.newPath();g.rectPath(0,0,this.size.width,this.size.height);g.fillPath(brush(g,C.bg));
+        var baseBrush=brush(g,C.map),activeBrush=brush(g,C.accent),borderPen=pen(g,C.border,0.65);
+        for(i=0;i<states.length;i++){s=states[i];g.newPath();for(j=0;j<s.rings.length;j++){ring=s.rings[j];if(!ring.length){continue;}g.moveTo(v.x+ring[0][0]*v.s,v.y+ring[0][1]*v.s);for(k=1;k<ring.length;k++){g.lineTo(v.x+ring[k][0]*v.s,v.y+ring[k][1]*v.s);}g.closePath();}g.fillPath(mode==='States'&&hasId(s.id)?activeBrush:baseBrush);g.strokePath(borderPen);}
+        if(mode==='Pins'){var marker=picked||(selected.length?stateById(selected[0]).center:null);if(marker){var mx=v.x+marker[0]*v.s,my=v.y+marker[1]*v.s;oval(g,pen(g,C.accent,1.4),mx-7,my-7,14,14,null);oval(g,null,mx-2,my-2,4,4,activeBrush);}}
+        if(mode==='Routes'){var previous=null,p;for(i=0;i<waypoints.length;i++){p=waypointPoint(waypoints[i]);if(!p){previous=null;continue;}var x=v.x+p[0]*v.s,y=v.y+p[1]*v.s;if(previous){line(g,pen(g,C.accent,1.4),[previous,[x,y]],0,0);}oval(g,pen(g,C.bg,1),x-3.5,y-3.5,7,7,activeBrush);previous=[x,y];}}
+    };
+    preview.addEventListener('click',function(event){
+        if(event.button!==undefined&&event.button!==0){return;}
+        try{var v=mapView(),p=[(event.clientX-v.x)/v.s,(event.clientY-v.y)/v.s],s=stateAt(p),i,next=[];if(p[0]<0||p[1]<0||p[0]>MapCtrlData.width||p[1]>MapCtrlData.height){return;}
+            if(currentMode()==='States'){if(!s){return;}if(event.ctrlKey||event.metaKey||event.shiftKey){for(i=0;i<selected.length;i++){if(selected[i]!==s.id){next.push(selected[i]);}}if(!hasId(s.id)){next.push(s.id);}selected=next;}else{selected=[s.id];}syncStateList();say(s.name+' selected. Choose a color, then apply or animate.',false);}
+            else if(currentMode()==='Pins'){picked=[Math.round(p[0]*10)/10,Math.round(p[1]*10)/10];showPoint();redraw(preview);say('Pin position set. Click the pin icon to add it.',false);}
+            else{waypoints.push({point:[Math.round(p[0]*10)/10,Math.round(p[1]*10)/10],label:(s?s.name:'Map point')+' ('+Math.round(p[0])+', '+Math.round(p[1])+')'});updateQueue(waypoints.length-1);say(waypoints.length+' waypoints. Click the route icon when ready.',false);}
+        }catch(e){say(e.message||String(e),true);}
+    });
+    tabs=win.add('tabbedpanel');tabs.alignment=['fill','top'];tabs.alignChildren=['fill','top'];tabs.margins=0;
+    var statesTab=tabs.add('tab',undefined,'States'),pinsTab=tabs.add('tab',undefined,'Pins'),routesTab=tabs.add('tab',undefined,'Routes'),tabArray=[statesTab,pinsTab,routesTab];
+    for(var ti=0;ti<tabArray.length;ti++){tabArray[ti].orientation='column';tabArray[ti].alignChildren=['fill','top'];tabArray[ti].margins=10;tabArray[ti].spacing=8;theme(tabArray[ti]);}
+    var search=theme(statesTab.add('edittext',undefined,''),C.surface);search.helpTip='Search states by name or abbreviation';search.preferredSize.height=25;note(statesTab,'Search above. Ctrl/Cmd-click for multiple states.');
+    stateList=statesTab.add('listbox',undefined,[],{multiselect:true});stateList.preferredSize=[300,80];stateList.alignment=['fill','top'];stateList.helpTip='Select states. Use Ctrl/Cmd or Shift to select multiple states.';
+    search.onChanging=function(){populateStates(this.text);};
+    stateList.onChange=function(){if(syncing){return;}var visible={},next=[],items=selectionArray(this),i;for(i=0;i<this.items.length;i++){visible[this.items[i]._stateId]=true;}for(i=0;i<selected.length;i++){if(!visible[selected[i]]){next.push(selected[i]);}}for(i=0;i<items.length;i++){next.push(items[i]._stateId);}selected=next;selectionChanged();};
+    var selectionRow=row(statesTab);
+    button(selectionRow,'all','Select all states',function(){selected=[];for(var i=0;i<states.length;i++){selected.push(states[i].id);}syncStateList();});
+    button(selectionRow,'none','Clear state selection',function(){selected=[];syncStateList();});
+    button(selectionRow,'sync','Use selected timeline states',act(function(){selected=MapCtrlCore.getSelectedStateIds();syncStateList();},'State selection copied from the timeline.'));
+    button(selectionRow,'target','Select these state layers in the timeline',act(function(){MapCtrlCore.selectStates(requiredStates());},'State layers selected in the timeline.'));
+    stretch(selectionRow);countText=note(selectionRow,'0 selected');countText.alignment=['right','center'];
+    stateColor=colorControl(statesTab,'#6BDDBD');stretch(stateColor.row);
+    button(stateColor.row,'fill','Apply fill color to selected states',act(function(){MapCtrlCore.setStateFill(requiredStates(),stateColor.read(),{animate:false,duration:1,stagger:0,easing:true});},'Fill color applied to selected states.'));
+    button(stateColor.row,'play','Animate selected states to this fill color',act(function(){MapCtrlCore.setStateFill(requiredStates(),stateColor.read(),{animate:true,duration:numberValue(stateDuration,'Duration',0.01,600),stagger:numberValue(stagger,'Stagger',0,60),easing:true});},'Fill animation added at the playhead.'),true);
+    var stime=row(statesTab);stateDuration=numeric(stime,'Duration',0.8,'Fill transition duration in seconds');stagger=numeric(stime,'Stagger',0.08,'Delay in seconds between states');note(stime,'s');
+    note(pinsTab,'Click the map to place your pin.');pointText=note(pinsTab,'Click the map to choose a position');
+    var labelRow=row(pinsTab);labelRow.add('statictext',undefined,'Label');pinLabel=theme(labelRow.add('edittext',undefined,''),C.surface);pinLabel.alignment=['fill','center'];pinLabel.helpTip='Optional pin label; leave empty for a pin without text';
+    pinColor=colorControl(pinsTab,'#6BDDBD');var psize=row(pinsTab);pinSize=numeric(psize,'Size',18,'Pin size in map pixels');note(psize,'map px');
+    var ptime=row(pinsTab);pinDuration=numeric(ptime,'Duration',0.5,'Pin entrance duration in seconds');note(ptime,'s');
+    var pinAnimate=pinsTab.add('checkbox',undefined,'Animate entrance');pinAnimate.value=true;pinAnimate.helpTip='Scale the new pin in from its tip at the playhead';var pactions=row(pinsTab);
+    button(pactions,'pin','Add a pin at the chosen map position',act(function(){MapCtrlCore.addPin(pinPoint(),pinLabel.text,{color:pinColor.read(),size:numberValue(pinSize,'Pin size',2,150),animate:pinAnimate.value,duration:numberValue(pinDuration,'Duration',0.01,600),easing:true});refreshPins();},'Pin added. Reposition it in the composition at any time.'),true);
+    button(pactions,'play','Animate selected pins; deselect all layers to animate all pins',act(function(){MapCtrlCore.animatePins({duration:numberValue(pinDuration,'Duration',0.01,600),easing:true});},'Pin entrance animation added at the playhead.'));
+    button(pactions,'target','Place pin at the first selected state center',act(function(){requiredStates();picked=stateById(selected[0]).center.slice(0);showPoint();redraw(preview);},'Pin position moved to the selected state center.'));
+    stretch(pactions);note(pinsTab,'Pin and label stay editable in the timeline.');
+    note(routesTab,'Click the map to add points, or link existing pins.');
+    var prow=row(routesTab);pinMenu=prow.add('dropdownlist',undefined,[]);pinMenu.alignment=['fill','center'];pinMenu.preferredSize.width=210;pinMenu.helpTip='Existing pins in the active map';
+    button(prow,'plus','Append this pin as a linked waypoint',act(function(){if(!pinMenu.selection||!pinMenu.selection._pinId){throw new Error('Add a pin first, or click the map to add a fixed waypoint.');}waypoints.push({pinId:pinMenu.selection._pinId,label:pinMenu.selection.text+' [pin]'});updateQueue(waypoints.length-1);},'Linked pin appended. The route will follow this pin.'));
+    button(prow,'refresh','Refresh available pins',act(refreshPins,'Pin list refreshed.'));
+    queue=routesTab.add('listbox',undefined,[],{multiselect:false});queue.preferredSize=[300,64];queue.helpTip='Route waypoints, in travel order';var qactions=row(routesTab);
+    button(qactions,'up','Move selected waypoint up',act(function(){var i=selectedQueueIndex();if(i>0){var w=waypoints[i-1];waypoints[i-1]=waypoints[i];waypoints[i]=w;updateQueue(i-1);}}));
+    button(qactions,'down','Move selected waypoint down',act(function(){var i=selectedQueueIndex();if(i<waypoints.length-1){var w=waypoints[i+1];waypoints[i+1]=waypoints[i];waypoints[i]=w;updateQueue(i+1);}}));
+    button(qactions,'remove','Remove selected waypoint',act(function(){var i=selectedQueueIndex();waypoints.splice(i,1);updateQueue(i);}));
+    button(qactions,'trash','Clear all queued waypoints',function(){waypoints=[];updateQueue();say('Waypoint queue cleared.',false);});stretch(qactions);note(qactions,'Travel order');
+    routeColor=colorControl(routesTab,'#6BDDBD');stretch(routeColor.row);
+    button(routeColor.row,'route','Create an animated dashed route through these waypoints',act(function(){MapCtrlCore.createRoute(waypoints,{color:routeColor.read(),width:numberValue(routeWidth,'Line width',0.1,100),dash:numberValue(routeDash,'Dash length',0.1,300),gap:numberValue(routeGap,'Gap length',0.1,300),duration:numberValue(routeDuration,'Duration',0.01,600),animate:true,flow:numberValue(routeFlow,'Flow speed',-1000,1000),easing:true});},'Animated route created. Linked pins remain connected.'),true);
+    button(routeColor.row,'play','Animate selected routes; deselect all layers to animate all routes',act(function(){MapCtrlCore.animateRoutes({duration:numberValue(routeDuration,'Duration',0.01,600),easing:true});},'Route draw-on animation added at the playhead.'));
+    var style=row(routesTab);routeWidth=numeric(style,'Width',3,'Stroke width in map pixels',3);routeDash=numeric(style,'Dash',10,'Dash length in map pixels',3);routeGap=numeric(style,'Gap',7,'Gap between dashes in map pixels',3);
+    var timing=row(routesTab);routeDuration=numeric(timing,'Time',2,'Route draw-on duration in seconds',4);routeFlow=numeric(timing,'Flow',24,'Dash movement in map pixels per second; 0 freezes dashes; negative reverses direction',4);note(timing,'px/s');
+    status=win.add('statictext',undefined,'Create a map with the folded-map icon to begin.',{multiline:true});status.alignment=['fill','top'];status.preferredSize=[320,34];status.maximumSize.height=40;theme(status);say('Create a map with the folded-map icon to begin.',false);
+    tabs.onChange=function(){var mode=currentMode();preview.helpTip=mode==='States'?'Click a state. Ctrl/Cmd-click to select several.':(mode==='Pins'?'Click to choose the new pin position.':'Click to append a fixed route waypoint.');if(mode==='Pins'){showPoint();}if(mode==='Routes'){try{refreshPins();}catch(e){say(e.message||String(e),true);}}redraw(preview);};
+    tabs.selection=statesTab;populateStates('');try{refreshPins();}catch(ignoreNoComp){pinMenu.add('item','Create a map to add pins');pinMenu.selection=0;}
+    win.onResizing=win.onResize=function(){this.layout.resize();redraw(preview);};win.layout.layout(true);win.minimumSize.height=Math.max(630,win.size.height);win.layout.resize();if(win instanceof Window){win.center();win.show();}return win;
+}

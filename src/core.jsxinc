@@ -1,0 +1,273 @@
+/* MapCtrl AE native-layer engine. ES3 ExtendScript. */
+var MapCtrlCore = (function () {
+    var C = {version: "1.0.0"}, prefix = "mapctrl:v1|", serial = 0;
+    function fail(s) { throw new Error(s); }
+    function numeric(v, fallback, min, max, label) {
+        if (v === undefined) { v = fallback; }
+        if (typeof v !== "number" || !isFinite(v) || v < min || v > max) { fail(label + " must be between " + min + " and " + max + "."); }
+        return v;
+    }
+    function rgb(v, fallback) {
+        v = v === undefined ? fallback : v;
+        if (!v || v.length < 3) { fail("Choose a valid color."); }
+        return [numeric(v[0], 0, 0, 1, "Red"), numeric(v[1], 0, 0, 1, "Green"), numeric(v[2], 0, 0, 1, "Blue"), 1];
+    }
+    function point(v) {
+        if (!v || v.length < 2) { fail("Choose a point on the map."); }
+        return [numeric(v[0], 0, 0, MapCtrlData.width, "Map X"), numeric(v[1], 0, 0, MapCtrlData.height, "Map Y")];
+    }
+    function meta(layer) { var s = layer.comment || ""; return s.indexOf(prefix) === 0 ? s.substr(prefix.length).split("|") : null; }
+    function tag(layer, kind, id) { layer.comment = prefix + kind + (id ? "|" + id : ""); }
+    function uid() { serial += 1; return String(new Date().getTime()) + "-" + serial; }
+    function undo(label, fn) { app.beginUndoGroup("MapCtrl - " + label); try { return fn(); } catch (e) { throw new Error(e.toString() + " If partially applied, use Edit > Undo once."); } finally { app.endUndoGroup(); } }
+    C.activeComp = function () { return app.project && app.project.activeItem instanceof CompItem ? app.project.activeItem : null; };
+    function layers(comp, kind) {
+        var a = [], i, m;
+        for (i = 1; i <= comp.numLayers; i += 1) { m = meta(comp.layer(i)); if (m && m[0] === kind) { a.push(comp.layer(i)); } }
+        return a;
+    }
+    C.getMap = function (comp) {
+        comp = comp || C.activeComp(); if (!comp) { return null; }
+        var a = layers(comp, "root");
+        if (a.length > 1) { fail("Keep one MapCtrl map per composition. This composition has duplicate map roots."); }
+        return a.length ? a[0] : null;
+    };
+    function context() {
+        var comp = C.activeComp(), root = C.getMap(comp);
+        if (!comp || !root) { fail("Open a composition and create a map first."); }
+        return {comp: comp, root: root};
+    }
+    function find(comp, kind, id) {
+        var a = layers(comp, kind), result = null, i;
+        for (i = 0; i < a.length; i += 1) { if (meta(a[i])[1] === id) { if (result) { fail("Duplicate MapCtrl layer identifier. Remove the duplicate layer first."); } result = a[i]; } }
+        return result;
+    }
+    function tr(layer, name) { return layer.property("ADBE Transform Group").property(name); }
+    function vector(p, x, y, z) { return p.value && p.value.length > 2 ? [x, y, z] : [x, y]; }
+    function setVector(layer, name, x, y, z) { var p = tr(layer, name); p.setValue(vector(p, x, y, z)); }
+    function identity(layer, parent, pos) {
+        layer.startTime = 0; layer.inPoint = 0; layer.outPoint = layer.containingComp.duration;
+        layer.parent = parent; pos = pos || [0, 0]; setVector(layer, "ADBE Anchor Point", 0, 0, 0);
+        setVector(layer, "ADBE Position", pos[0], pos[1], 0);
+        setVector(layer, "ADBE Scale", 100, 100, 100); tr(layer, "ADBE Rotate Z").setValue(0);
+    }
+    function editable(layer, p) {
+        if (layer.locked) { fail("Unlock " + layer.name + " first."); }
+        if (!p) { fail("A MapCtrl property is missing on " + layer.name + ". Restore it with Undo."); }
+        if (p.expressionEnabled) { fail("Disable the expression on " + layer.name + " / " + p.name + " first."); }
+    }
+    function deselect(comp) { var a = comp.selectedLayers, i; for (i = 0; i < a.length; i += 1) { a[i].selected = false; } }
+    function contents(layer, name) {
+        var g = layer.property("ADBE Root Vectors Group").property(name);
+        if (!g) { fail("The " + name + " shape group is missing on " + layer.name + "."); }
+        return g.property("ADBE Vectors Group");
+    }
+    function group(layer, name) { var g = layer.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group"); g.name = name; }
+    function geometry(v, closed, ins, outs) {
+        var s = new Shape(), z = [], i; for (i = 0; i < v.length; i += 1) { z.push([0, 0]); }
+        s.vertices = v; s.inTangents = ins || z; s.outTangents = outs || z; s.closed = closed; return s;
+    }
+    function path(layer, name, title, s) {
+        var p = contents(layer, name).addProperty("ADBE Vector Shape - Group"); p.name = title; p.property("ADBE Vector Shape").setValue(s);
+    }
+    function fill(layer, name, color) {
+        var p = contents(layer, name).addProperty("ADBE Vector Graphic - Fill");
+        p.property("ADBE Vector Fill Color").setValue(color); p.property("ADBE Vector Fill Rule").setValue(2);
+    }
+    function stroke(layer, name, color, width) {
+        var p = contents(layer, name).addProperty("ADBE Vector Graphic - Stroke");
+        p.property("ADBE Vector Stroke Color").setValue(color); p.property("ADBE Vector Stroke Width").setValue(width);
+        p.property("ADBE Vector Stroke Line Join").setValue(2); p.property("ADBE Vector Stroke Line Cap").setValue(2);
+    }
+    function timing(comp, duration, stagger, count) {
+        duration = numeric(duration, 1, comp.frameDuration, 3600, "Duration"); stagger = numeric(stagger, 0, 0, 3600, "Stagger");
+        if (comp.time < 0 || comp.time + duration + stagger * Math.max(0, count - 1) > comp.duration + 0.000001) { fail("The animation exceeds the composition. Move the playhead earlier, shorten the timing, or extend the composition."); }
+        return {start: comp.time, duration: duration, stagger: stagger};
+    }
+    function ease(p, k) {
+        var n = 1, a = [], b = [], i;
+        if (p.propertyValueType === PropertyValueType.TwoD) { n = 2; }
+        if (p.propertyValueType === PropertyValueType.ThreeD) { n = 3; }
+        for (i = 0; i < n; i += 1) { a.push(new KeyframeEase(0, 70)); b.push(new KeyframeEase(0, 70)); }
+        p.setInterpolationTypeAtKey(k, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); p.setTemporalEaseAtKey(k, a, b);
+    }
+    function animate(p, from, to, start, duration, easing) {
+        var end = start + duration, i, first, last;
+        // Replace only the requested interval. Unrelated keys remain intact.
+        for (i = p.numKeys; i >= 1; i -= 1) { if (p.keyTime(i) >= start - 0.000001 && p.keyTime(i) <= end + 0.000001) { p.removeKey(i); } }
+        p.setValueAtTime(start, from); p.setValueAtTime(end, to); first = p.nearestKeyIndex(start); last = p.nearestKeyIndex(end);
+        if (easing !== false) { ease(p, first); ease(p, last); }
+        else { p.setInterpolationTypeAtKey(first, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); p.setInterpolationTypeAtKey(last, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); }
+    }
+
+    C.createMap = function (options) {
+        options = options || {};
+        var color = rgb(options.fill, [0.18, 0.24, 0.30]), border = rgb(options.stroke, [0.08, 0.11, 0.15]);
+        var width = numeric(options.strokeWidth, 1.2, 0, 50, "Border width"), comp = C.activeComp(), existing = comp ? C.getMap(comp) : null;
+        if (existing) {
+            for (var si = 0; si < MapCtrlData.states.length; si += 1) {
+                if (!find(comp, "state", MapCtrlData.states[si].id)) { fail("This map is incomplete. Undo the interrupted creation or create a map in a new composition."); }
+            }
+            return {comp: comp, root: existing};
+        }
+        return undo("Create map", function () {
+            var root, ratio, i, j, k, state, layer, vertices;
+            if (!app.project) { app.newProject(); }
+            if (!comp) { comp = app.project.items.addComp("MapCtrl - United States", 1920, 1080, 1, 10, 30); }
+            root = comp.layers.addNull(comp.duration); root.name = "MapCtrl - Map"; tag(root, "root"); root.label = 9;
+            identity(root, null, [0, 0]);
+            ratio = Math.min(comp.width * 0.88 / MapCtrlData.width, comp.height * 0.88 / MapCtrlData.height);
+            tr(root, "ADBE Position").setValue([(comp.width - MapCtrlData.width * ratio) / 2, (comp.height - MapCtrlData.height * ratio) / 2]);
+            setVector(root, "ADBE Scale", ratio * 100, ratio * 100, 100);
+            for (i = MapCtrlData.states.length - 1; i >= 0; i -= 1) {
+                state = MapCtrlData.states[i]; layer = comp.layers.addShape(); layer.name = state.id + " - " + state.name;
+                tag(layer, "state", state.id); layer.label = 8; identity(layer, root, state.center); group(layer, "State");
+                for (j = 0; j < state.rings.length; j += 1) {
+                    vertices = [];
+                    for (k = 0; k < state.rings[j].length; k += 1) { vertices.push([state.rings[j][k][0] - state.center[0], state.rings[j][k][1] - state.center[1]]); }
+                    path(layer, "State", "Boundary " + (j + 1), geometry(vertices, true));
+                }
+                fill(layer, "State", color); stroke(layer, "State", border, width);
+            }
+            root.moveToBeginning(); deselect(comp); root.selected = true; comp.openInViewer(); return {comp: comp, root: root};
+        });
+    };
+    function stateTargets(comp, ids) {
+        var result = [], seen = {}, i, layer;
+        if (!ids || !ids.length) { fail("Select at least one state."); }
+        for (i = 0; i < ids.length; i += 1) {
+            if (seen[ids[i]]) { continue; } seen[ids[i]] = true; layer = find(comp, "state", ids[i]);
+            if (!layer) { fail("The " + ids[i] + " layer is missing from this map."); } result.push(layer);
+        }
+        return result;
+    }
+    C.selectStates = function (ids) { var ctx = context(), a = stateTargets(ctx.comp, ids), i; deselect(ctx.comp); for (i = 0; i < a.length; i += 1) { a[i].selected = true; } return a.length; };
+    C.getSelectedStateIds = function () {
+        var comp = C.activeComp(), a, result = [], i, m; if (!comp) { return result; } a = comp.selectedLayers;
+        for (i = 0; i < a.length; i += 1) { m = meta(a[i]); if (m && m[0] === "state") { result.push(m[1]); } } return result;
+    };
+    C.setStateFill = function (ids, color, options) {
+        options = options || {};
+        var ctx = context(), targets = stateTargets(ctx.comp, ids), c = rgb(color, [0.24, 0.78, 0.68]);
+        var props = [], starts = [], i, p, g, t;
+        if (options.animate) { t = timing(ctx.comp, options.duration, options.stagger, targets.length); }
+        for (i = 0; i < targets.length; i += 1) {
+            g = contents(targets[i], "State").property("ADBE Vector Graphic - Fill"); p = g ? g.property("ADBE Vector Fill Color") : null;
+            editable(targets[i], p); props.push(p); if (options.animate) { starts.push(p.valueAtTime(t.start + i * t.stagger, true)); }
+        }
+        return undo(options.animate ? "Animate states" : "Color states", function () {
+            for (i = 0; i < props.length; i += 1) {
+                if (options.animate) { animate(props[i], starts[i], c, t.start + i * t.stagger, t.duration, options.easing); }
+                else if (props[i].numKeys > 0) { props[i].setValueAtTime(ctx.comp.time, c); } else { props[i].setValue(c); }
+            }
+            return props.length;
+        });
+    };
+    C.addPin = function (mapPoint, label, options) {
+        options = options || {};
+        var ctx = context(), p = point(mapPoint), color = rgb(options.color, [1, 0.42, 0.29]), size = numeric(options.size, 18, 2, 150, "Pin size"), t;
+        label = String(label || "").replace(/[\r\n]/g, " ").substr(0, 120);
+        if (options.animate) { t = timing(ctx.comp, options.duration, 0, 1); }
+        return undo("Add pin", function () {
+            var layer = ctx.comp.layers.addShape(), id = uid(), r = size / 2, ellipse, textLayer, doc;
+            layer.name = "Pin - " + (label || "Waypoint"); tag(layer, "pin", id); layer.label = 1; identity(layer, ctx.root, p); group(layer, "Pin");
+            path(layer, "Pin", "Pin body", geometry(
+                [[0, 0], [-r, -1.4 * r], [0, -2.4 * r], [r, -1.4 * r]], true,
+                [[0, 0], [0, 0.65 * r], [-0.56 * r, 0], [0, -0.56 * r]],
+                [[0, 0], [0, -0.56 * r], [0.56 * r, 0], [0, 0.65 * r]]
+            ));
+            fill(layer, "Pin", color); group(layer, "Pin center");
+            ellipse = contents(layer, "Pin center").addProperty("ADBE Vector Shape - Ellipse");
+            ellipse.property("ADBE Vector Ellipse Size").setValue([r * 0.75, r * 0.75]); ellipse.property("ADBE Vector Ellipse Position").setValue([0, -1.4 * r]);
+            fill(layer, "Pin center", [1, 1, 1, 1]);
+            if (label) {
+                textLayer = ctx.comp.layers.addText(label); textLayer.name = "Label - " + label; tag(textLayer, "label", id);
+                identity(textLayer, layer, [r * 1.4, -r * 1.2]); doc = textLayer.property("ADBE Text Properties").property("ADBE Text Document").value;
+                doc.fontSize = size * 0.65; doc.applyFill = true; doc.fillColor = [0.96, 0.97, 1]; doc.applyStroke = false; doc.justification = ParagraphJustification.LEFT_JUSTIFY;
+                textLayer.property("ADBE Text Properties").property("ADBE Text Document").setValue(doc);
+            }
+            if (options.animate) { var scale = tr(layer, "ADBE Scale"); animate(scale, vector(scale, 0, 0, 0), vector(scale, 100, 100, 100), t.start, t.duration, options.easing); }
+            deselect(ctx.comp); layer.selected = true; return layer;
+        });
+    };
+    C.getPins = function () {
+        var comp = C.activeComp(), result = [], pins, i, p; if (!comp || !C.getMap(comp)) { return result; } pins = layers(comp, "pin");
+        for (i = 0; i < pins.length; i += 1) { p = tr(pins[i], "ADBE Position").value; result.push({id: meta(pins[i])[1], name: pins[i].name, point: [p[0], p[1]]}); } return result;
+    };
+    function routePath(layer) { return contents(layer, "Route").property("Route path").property("ADBE Vector Shape"); }
+    function routeStroke(layer) { return contents(layer, "Route").property("ADBE Vector Graphic - Stroke"); }
+    function routeEnd(layer) { var g = contents(layer, "Route").property("ADBE Vector Filter - Trim"); return g ? g.property("ADBE Vector Trim End") : null; }
+    C.createRoute = function (waypoints, options) {
+        options = options || {};
+        var ctx = context(), color = rgb(options.color, [0.35, 0.83, 1]);
+        var width = numeric(options.width, 2.5, 0.1, 100, "Route width"), dash = numeric(options.dash, 8, 0.1, 500, "Dash length"), gap = numeric(options.gap, 6, 0.1, 500, "Gap length");
+        var flow = numeric(options.flow, 0, -1000, 1000, "Dash flow"), points = [], pins = [], i, pin, p, t, hasDistance = false;
+        if (!waypoints || waypoints.length < 2) { fail("Add at least two waypoints to create a route."); }
+        if (waypoints.length > 100) { fail("A route can contain up to 100 waypoints."); }
+        if (options.animate) { t = timing(ctx.comp, options.duration, 0, 1); }
+        for (i = 0; i < waypoints.length; i += 1) {
+            pin = null;
+            if (waypoints[i].pinId) {
+                pin = find(ctx.comp, "pin", waypoints[i].pinId); if (!pin) { fail("A route pin was removed. Refresh the pin list and choose another waypoint."); }
+                p = tr(pin, "ADBE Position").value; p = [p[0], p[1]];
+            } else { p = point(waypoints[i].point); }
+            if (i > 0 && (Math.abs(p[0] - points[i - 1][0]) > 0.001 || Math.abs(p[1] - points[i - 1][1]) > 0.001)) { hasDistance = true; }
+            points.push(p); pins.push(pin);
+        }
+        if (!hasDistance) { fail("Place route waypoints at different positions."); }
+        return undo("Create route", function () {
+            var layer = ctx.comp.layers.addShape(), dashes, control, expr = "var pts = [];\nvar p, link;\n", bottomPin = null;
+            layer.name = "Route - " + waypoints.length + " waypoints"; tag(layer, "route", uid()); layer.label = 10; identity(layer, ctx.root, [0, 0]);
+            group(layer, "Route"); path(layer, "Route", "Route path", geometry(points, false)); stroke(layer, "Route", color, width);
+            dashes = routeStroke(layer).property("ADBE Vector Stroke Dashes"); dashes.addProperty("ADBE Vector Stroke Dash 1").setValue(dash);
+            routeStroke(layer).property("ADBE Vector Stroke Dashes").addProperty("ADBE Vector Stroke Gap 1").setValue(gap);
+            dashes = routeStroke(layer).property("ADBE Vector Stroke Dashes");
+            if (!dashes.property("ADBE Vector Stroke Offset")) { dashes.addProperty("ADBE Vector Stroke Offset"); }
+            if (flow !== 0) { routeStroke(layer).property("ADBE Vector Stroke Dashes").property("ADBE Vector Stroke Offset").expression = "-(time - " + ctx.comp.time + ") * " + flow + ";"; }
+            contents(layer, "Route").addProperty("ADBE Vector Filter - Trim");
+            for (i = 0; i < points.length; i += 1) {
+                if (pins[i]) {
+                    if (!bottomPin || pins[i].index > bottomPin.index) { bottomPin = pins[i]; }
+                    control = layer.property("ADBE Effect Parade").addProperty("ADBE Layer Control"); control.name = "Waypoint " + (i + 1); control.property(1).setValue(pins[i].index);
+                    expr += "p = [" + points[i][0] + "," + points[i][1] + "];\n";
+                    expr += "try { link = effect(\"Waypoint " + (i + 1) + "\")(1); p = thisLayer.fromComp(link.toComp(link.anchorPoint)); } catch (err) {}\n";
+                    expr += "pts.push([p[0], p[1]]);\n";
+                } else { expr += "pts.push([" + points[i][0] + "," + points[i][1] + "]);\n"; }
+            }
+            if (bottomPin) {
+                routePath(layer).expression = expr + "createPath(pts, [], [], false);";
+                if (routePath(layer).expressionError) { fail("Route expression: " + routePath(layer).expressionError); }
+            }
+            if (routeStroke(layer).property("ADBE Vector Stroke Dashes").property("ADBE Vector Stroke Offset").expressionError) { fail("The dash-flow expression could not be evaluated."); }
+            if (options.animate) { animate(routeEnd(layer), 0, 100, t.start, t.duration, options.easing); }
+            var annotations = layers(ctx.comp, "pin").concat(layers(ctx.comp, "label"));
+            for (i = 0; i < annotations.length; i += 1) { if (!bottomPin || annotations[i].index > bottomPin.index) { bottomPin = annotations[i]; } }
+            if (bottomPin) { layer.moveAfter(bottomPin); }
+            deselect(ctx.comp); layer.selected = true; return layer;
+        });
+    };
+    function animationTargets(comp, kind) {
+        var selected = comp.selectedLayers, targets = [], i, m;
+        for (i = 0; i < selected.length; i += 1) { m = meta(selected[i]); if (m && m[0] === kind) { targets.push(selected[i]); } }
+        if (selected.length && !targets.length) { fail("Select a MapCtrl " + (kind === "pin" ? "pin" : "route") + ", or deselect all layers to animate all of them."); }
+        return targets.length ? targets : layers(comp, kind);
+    }
+    C.animatePins = function (options) {
+        options = options || {};
+        var ctx = context(), targets = animationTargets(ctx.comp, "pin"), t, props = [], ends = [], i, p, end;
+        if (!targets.length) { fail("Add a pin first."); } t = timing(ctx.comp, options.duration, 0, targets.length);
+        for (i = 0; i < targets.length; i += 1) {
+            p = tr(targets[i], "ADBE Scale"); editable(targets[i], p); end = p.valueAtTime(t.start + t.duration, true);
+            if (Math.abs(end[0]) + Math.abs(end[1]) < 0.001) { end = vector(p, 100, 100, 100); } props.push(p); ends.push(end);
+        }
+        return undo("Animate pins", function () { for (i = 0; i < props.length; i += 1) { animate(props[i], vector(props[i], 0, 0, 0), ends[i], t.start, t.duration, options.easing); } return props.length; });
+    };
+    C.animateRoutes = function (options) {
+        options = options || {};
+        var ctx = context(), targets = animationTargets(ctx.comp, "route"), props = [], i, t, p;
+        if (!targets.length) { fail("Create a route first."); } t = timing(ctx.comp, options.duration, 0, targets.length);
+        for (i = 0; i < targets.length; i += 1) { p = routeEnd(targets[i]); editable(targets[i], p); props.push(p); }
+        return undo("Animate routes", function () { for (i = 0; i < props.length; i += 1) { animate(props[i], 0, 100, t.start, t.duration, options.easing); } return props.length; });
+    };
+    return C;
+}());

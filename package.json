@@ -1,0 +1,14 @@
+{
+  "name": "mapctrl-for-ae",
+  "version": "1.0.0",
+  "private": true,
+  "description": "An icon-first ScriptUI panel for animating US states, pins and routes in Adobe After Effects.",
+  "license": "MIT",
+  "scripts": {
+    "build:data": "node scripts/build-data.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run build:data && npm run build && npm test"
+  },
+  "engines": { "node": ">=20" }
+}

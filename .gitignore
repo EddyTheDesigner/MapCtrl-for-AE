@@ -1,0 +1,7 @@
+node_modules/
+.local/
+test-results/
+*.aep
+*.aepx
+.DS_Store
+Thumbs.db
